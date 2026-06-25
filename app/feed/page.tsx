@@ -17,12 +17,12 @@ import { TileGrid, parseTiles } from '@/components/TileGrid';
 import { AdEditor } from '@/components/AdEditor';
 import { parseWidgetImages } from '@/lib/widget';
 import { useSampleUser } from '@/lib/sampleUser';
-import { useModule, MODULES, subTabsFor, allTabLocations, NAV_TABS } from '@/lib/modules';
+import { useModule, MODULES, MODULE_GROUPS, subTabsFor, allTabLocations, NAV_TABS } from '@/lib/modules';
 import type { ModuleKey, Audience } from '@/lib/modules';
 import { ruleSummary } from '@/lib/dsl';
 import { KILL_PRIORITY, activeKill, chainFor, customRules, isCustomRule, isKillRule } from '@/lib/rules';
 import { friendlyHint, friendlyName, isSentinel } from '@/lib/names';
-import { PreviewResult, SampleUser } from '@/lib/types';
+import { PreviewResult } from '@/lib/types';
 
 /**
  * LIVE APP VIEW — the one place to control everything the app shows on EXPLORE.
@@ -68,14 +68,20 @@ export default function FeedPage() {
   const servedByLocation = useMemo(() => {
     const m = new Map<string, AdsDTO[]>();
     for (const ad of r?.served ?? []) {
-      if (ad.location) m.set(ad.location, [...(m.get(ad.location) ?? []), ad]);
+      // suffix-killed legacy ads (location ends in "...XXX") match no app widget — never show them in preview
+      if (ad.location && !ad.location.endsWith('XXX')) m.set(ad.location, [...(m.get(ad.location) ?? []), ad]);
     }
     return m;
   }, [r]);
 
   // ---- tabbed modules: the real Trade Board shows different sub-tabs to paid vs unpaid viewers ----
   const audience: Audience = r?.isPaid ? 'paid' : 'unpaid';
-  const subTabs = subTabsFor(M, audience);
+  // Commodity is a conditional tab in the app (paid: tradeCardSequence contains COMMODITY; unpaid:
+  // commodityEnabled). Approximate from the live preview: show it only when a commodity ad is actually
+  // served/traced for this user, so the admin's tab set matches the user's real Trade Board.
+  const subTabs = useMemo(() => subTabsFor(M, audience).filter((t) =>
+    t.id !== 'commodity' || t.locations.some((loc) => servedByLocation.has(loc) || traceByLocation.has(loc)),
+  ), [M, audience, servedByLocation, traceByLocation]);
   const activeSub = subTabs.find((t) => t.id === activeTab) ?? subTabs[0];
   // reset to the first sub-tab when the screen (module) or persona (paid/unpaid) changes
   useEffect(() => { setActiveTab(subTabs[0]?.id ?? ''); }, [mod, audience]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -113,7 +119,19 @@ export default function FeedPage() {
       return (sa ?? 0) - (sb ?? 0);
     });
   }, [M, activeSub, layoutQ.data]);
-  const baseOrder = M.usesWidgetOrder ? widgetOrder : tabOrder;
+  // Flat modules (payment / checkout): no widget-order and no audience sub-tabs — render whatever the live
+  // serving path returns for this user, in order (served first, then any trace/rule-only locations).
+  const flatOrder = useMemo(() => {
+    if (M.usesWidgetOrder || M.audienceTabs) return [] as string[];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const push = (loc?: string | null) => { if (loc && !seen.has(loc)) { seen.add(loc); out.push(loc); } };
+    (r?.served ?? []).forEach((a) => push(a.location));
+    (r?.trace ?? []).forEach((t) => push(t.location));
+    rules.forEach((x) => push(x.location));
+    return out;
+  }, [M, r, rules]);
+  const baseOrder = M.usesWidgetOrder ? widgetOrder : (M.audienceTabs ? tabOrder : flatOrder);
   const [order, setOrder] = useState<string[]>([]);
   useEffect(() => { setOrder(baseOrder); }, [baseOrder]);
   const [confirmLayout, setConfirmLayout] = useState(false);
@@ -168,7 +186,7 @@ export default function FeedPage() {
   const [editor, setEditor] = useState<{ location: string; rule: AdRule | null; prefill: AdsDTO | null } | null>(null);
 
   // For tabbed modules the "in-screen" set is every location across all tabs; for EXPLORE it's the widget order.
-  const inScreen = M.usesWidgetOrder ? new Set(widgetOrder) : allTabLocations(M);
+  const inScreen = M.usesWidgetOrder ? new Set(widgetOrder) : (M.audienceTabs ? allTabLocations(M) : new Set(baseOrder));
 
   // Every managed location outside the in-screen set (overlays, bottomsheets, discover, or app-version
   // remap variants like *_MF) — including ones currently serving nothing, so a hidden overlay can always
@@ -177,7 +195,7 @@ export default function FeedPage() {
     ...(r?.served ?? []).map((a) => a.location).filter((l): l is string => !!l),
     ...(r?.trace ?? []).map((t) => t.location),
     ...rules.map((x) => x.location),
-  ])).filter((loc) => !inScreen.has(loc));
+  ])).filter((loc) => !inScreen.has(loc) && !loc.endsWith('XXX'));
 
   const isManaged = (loc: string) =>
     traceByLocation.has(loc) || servedByLocation.has(loc) || chainFor(rules, loc).length > 0
@@ -186,13 +204,14 @@ export default function FeedPage() {
   return (
     <div className="mx-auto max-w-3xl p-6 pb-24">
       {/* Header + master switch */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="flex items-center gap-2 text-xl font-semibold text-slate-800">
             <Smartphone className="h-5 w-5 text-brand-600" /> Live App View
           </h1>
           <p className="mt-1 text-sm text-slate-500">The {M.screenLabel} screen exactly as the app shows it. Every control is on the card.</p>
         </div>
+        <ScreenPicker mod={mod} onPick={setMod} />
       </div>
 
       {/* THE banner — engine state is impossible to miss */}
@@ -225,7 +244,7 @@ export default function FeedPage() {
 
       {!sampleUser && (
         <Card className="mt-6 p-10 text-center text-sm text-slate-400">
-          Pick who to view as above (attach a user id to “Free user” / “Paid user” once) — you&apos;ll see their Explore screen exactly as the app shows it.
+          Enter a phone number (or user id) above — you&apos;ll see that user&apos;s {M.screenLabel} screen exactly as the app shows it.
         </Card>
       )}
       {previewQ.isError && <p className="mt-4 text-sm text-red-600">{(previewQ.error as Error).message}</p>}
@@ -262,7 +281,7 @@ export default function FeedPage() {
                 <SortableContext items={order} strategy={verticalListSortingStrategy}>
                   {order.map((loc) => (
                     <SortableEntry key={loc} id={loc}>
-                      {(isManaged(loc) || !M.usesWidgetOrder) ? (
+                      {isManaged(loc) ? (
                         <SlotCard
                           module={mod}
                           location={loc}
@@ -276,13 +295,17 @@ export default function FeedPage() {
                           onChanged={refreshAll}
                           onEdit={(rule, prefill) => setEditor({ location: loc, rule, prefill })}
                         />
-                      ) : (
+                      ) : M.usesWidgetOrder ? (
                         <SystemChip name={loc} />
+                      ) : (
+                        <DormantSlotChip name={loc} />
                       )}
                     </SortableEntry>
                   ))}
                   {order.length === 0 && !M.usesWidgetOrder && (
-                    <p className="py-6 text-center text-xs text-slate-400">No ad slots in this tab for this user.</p>
+                    <p className="py-6 text-center text-xs text-slate-400">
+                      {M.audienceTabs ? 'No ad slots in this tab for this user.' : 'No ads are served on this screen for this user.'}
+                    </p>
                   )}
                 </SortableContext>
               </DndContext>
@@ -386,6 +409,18 @@ function SystemChip({ name }: { name: string }) {
     <div className="ml-3 flex items-center justify-between rounded-lg border border-dashed border-slate-300 bg-white/60 px-3 py-1.5">
       <span className="text-[11px] text-slate-400">{friendlyName(name)}</span>
       <span className="text-[9px] uppercase tracking-wide text-slate-300">{isSentinel(name) ? 'placeholder' : 'app section'}</span>
+    </div>
+  );
+}
+
+/** A declared ad slot for this tab that the app is NOT serving to this user right now — paid/unpaid-gated,
+ *  empty-state-only (EMPTY_*), or simply no creative. Muted so the preview matches what the app renders. */
+function DormantSlotChip({ name }: { name: string }) {
+  const emptyOnly = name.toUpperCase().startsWith('EMPTY_');
+  return (
+    <div className="ml-3 flex items-center justify-between rounded-lg border border-dashed border-slate-200 bg-slate-50/50 px-3 py-1.5">
+      <span className="text-[11px] text-slate-400">{friendlyName(name)}</span>
+      <span className="text-[9px] uppercase tracking-wide text-slate-300">{emptyOnly ? 'empty-state only' : 'no ad for this user'}</span>
     </div>
   );
 }
@@ -632,15 +667,7 @@ function SlotCard({ module, location, servedAds, decision, chain, predicates, sc
   );
 }
 
-// ---- persona bar: "view the app as…" — real cohorts, server-verified ------------------------------
-
-const STATES: { key: string; label: string; member: (f: SampleUser) => boolean }[] = [
-  { key: 'PAID', label: 'Paid user', member: (f) => !!f.paid },
-  { key: 'FREE', label: 'Free user', member: (f) => !f.paid && !f.guest },
-  { key: 'GUEST', label: 'Guest', member: (f) => !!f.guest },
-  { key: 'KYC_DONE', label: 'KYC done', member: (f) => !!f.kycCompleted },
-  { key: 'KYC_PENDING', label: 'KYC pending', member: (f) => !f.kycCompleted },
-];
+// ---- viewer bar: number search drives the whole preview ("view the app as this phone number") ------
 
 function PersonaBar({ r, sampleUser, setSampleUser, fetching, onRefresh }: {
   r?: PreviewResult; sampleUser: string; setSampleUser: (v: string) => void;
@@ -659,16 +686,6 @@ function PersonaBar({ r, sampleUser, setSampleUser, fetching, onRefresh }: {
   });
   const facts = factsQ.data;
 
-  // click a chip → backend picks a random recent user in that cohort; click again → another one
-  const pick = useMutation({
-    mutationFn: (state: string) => api.sampleUser({ state }),
-    onSuccess: (f) => {
-      setSampleUser(String(f.userId));
-      toast('success', `Now viewing as user #${f.userId} (${f.paid ? 'paid' : f.guest ? 'guest' : 'free'}, KYC ${f.kycCompleted ? 'done' : 'pending'})`);
-    },
-    onError: (e) => toast('error', (e as Error).message),
-  });
-
   // typed a user id or phone number → resolve it and report the real cohorts
   const lookup = useMutation({
     mutationFn: (q: string) => api.sampleUser({ q }),
@@ -683,30 +700,13 @@ function PersonaBar({ r, sampleUser, setSampleUser, fetching, onRefresh }: {
 
   return (
     <Card className="mt-4 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="flex items-center gap-1 text-xs font-medium text-slate-500"><UserRound className="h-3.5 w-3.5" /> View the app as:</span>
-        {STATES.map((s) => {
-          const isMember = facts ? s.member(facts) : false;
-          return (
-            <button key={s.key} onClick={() => pick.mutate(s.key)} disabled={pick.isPending}
-              title={`Pick a random ${s.label.toLowerCase()} — click again for another one`}
-              className={clsx('rounded-full border px-3 py-1 text-xs font-medium transition disabled:opacity-50',
-                isMember ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300')}>
-              {isMember && '✓ '}{s.label}
-            </button>
-          );
-        })}
-        <button onClick={() => pick.mutate('ANY')} disabled={pick.isPending}
-          title="Pick any random recent user"
-          className="rounded-full border border-dashed border-slate-300 px-3 py-1 text-xs text-slate-500 hover:border-slate-400">
-          🎲 anyone
-        </button>
-        {pick.isPending && <span className="text-xs text-slate-400">finding someone…</span>}
+      <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
+        <UserRound className="h-3.5 w-3.5" /> Preview the app for a specific phone number — exactly what that user sees in production.
       </div>
 
       <div className="mt-2 flex items-end gap-2">
-        <div className="w-60">
-          <Input label="Or a specific user id / phone number" value={query}
+        <div className="w-72">
+          <Input label="Phone number (or user id)" value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') commitQuery(); }}
             onBlur={commitQuery}
@@ -741,6 +741,24 @@ function IconBtn({ children, title, onClick, disabled }: {
       className="rounded-md p-1.5 transition hover:bg-slate-100 disabled:opacity-40">
       {children}
     </button>
+  );
+}
+
+// ---- screen picker (switch the previewed module, including the payment / checkout surfaces) --------
+
+function ScreenPicker({ mod, onPick }: { mod: ModuleKey; onPick: (m: ModuleKey) => void }) {
+  return (
+    <select value={mod} onChange={(e) => onPick(e.target.value as ModuleKey)}
+      title="Switch the previewed screen"
+      className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-sm focus:border-brand-400 focus:outline-none">
+      {MODULE_GROUPS.map((g) => (
+        <optgroup key={g.label} label={g.label}>
+          {g.modules.map((k) => (
+            <option key={k} value={k}>{MODULES[k].label}</option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
   );
 }
 

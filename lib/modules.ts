@@ -12,7 +12,18 @@ import { useEffect, useState } from 'react';
  *                  paid   → Overview, Stocks, Futures, Options (+ Commodity)   [tradeCardSequence]
  *                  unpaid → Overview, Live Trades, Closed Trades (+ Commodity) [unpaidUserTermSequence]
  */
-export type ModuleKey = 'EXPLORE' | 'TRADECARD';
+export type ModuleKey =
+  | 'EXPLORE'
+  | 'TRADECARD'
+  // Payment / checkout surfaces. Each is a distinct {adType} the app fetches via getAdsSize, so each gets its
+  // own engine toggle + rules. They are "flat" modules (no widget-order, no audience sub-tabs): the phone
+  // preview renders whatever locations the live serving path returns for the user, in order.
+  | 'PAYMENT_SHEET'
+  | 'TRIAL_PAYMENT_PAGE'
+  | 'BASKET_PAYMENT_PAGE'
+  | 'MF_PAYMENT_PAGE'
+  | 'COMMODITY_SUBSCRIPTION_AD_PAGE'
+  | 'PAYMENT_INVESTMENT_SUMMERY';
 
 export interface SubTab {
   id: string;
@@ -49,39 +60,68 @@ export const MODULES: Record<ModuleKey, ModuleDef> = {
     label: 'Trades',
     screenLabel: 'Trade Board',
     usesWidgetOrder: false,
+    // Tabs mirror the real CirclesTabController (circles_tab_controller.dart). Both sets always lead with
+    // Overview; the rest are data-driven in the app (paid: tradeCardSequence; unpaid: commodityEnabled).
+    // Commodity is CONDITIONAL — the feed page only shows it when commodity ads are actually served to the
+    // previewed user. EMPTY_* slots only render in the app when that tab has zero trades (empty-state only).
     audienceTabs: {
       paid: [
-        {
-          id: 'overview',
-          label: 'Overview',
-          locations: [
-            'TradeBoardHomeCustomAdsForPaidUser1',
-            'TradeBoardHomeCustomAdsForPaidUser2',
-            'TradeBoardHomeCustomAdsForPaidUser3',
-            'TradeBoardHomeCustomAdsIdeaSegment',
-            'TRADE_CARD_MID_AD',
-          ],
-        },
-        { id: 'stocks', label: 'Stocks', locations: ['TRADE_STOCK', 'TRADE_STOCK_2', 'EMPTY_STOCK'] },
-        { id: 'futures', label: 'Futures', locations: ['TRADE_FUTURES', 'TRADE_FUTURES_2', 'EMPTY_FUTURES'] },
-        { id: 'options', label: 'Options', locations: ['TRADE_OPTIONS', 'TRADE_OPTIONS_2', 'EMPTY_OPTIONS'] },
-        { id: 'commodity', label: 'Commodity', locations: ['TRADE_COMMODITY', 'TRADE_COMMODITY_2', 'EMPTY_COMMODITY'] },
+        // Overview shows the three paid custom-ad slots in app order (User3 above 'Ideas by segment', then User1, User2).
+        { id: 'overview', label: 'Overview', locations: ['TradeBoardHomeCustomAdsForPaidUser3', 'TradeBoardHomeCustomAdsForPaidUser1', 'TradeBoardHomeCustomAdsForPaidUser2'] },
+        { id: 'stocks', label: 'Stocks', locations: ['TRADE_STOCK', 'EMPTY_STOCK'] },
+        { id: 'futures', label: 'Futures', locations: ['TRADE_FUTURES', 'EMPTY_FUTURES'] },
+        { id: 'options', label: 'Options', locations: ['TRADE_OPTIONS', 'EMPTY_OPTIONS'] },
+        { id: 'commodity', label: 'Commodity', locations: ['TRADE_COMMODITY', 'EMPTY_COMMODITY'] },
       ],
       unpaid: [
-        {
-          id: 'overview',
-          label: 'Overview',
-          locations: ['TRADE_HOME_TOP', 'TRADE_HOME_MID', 'TRADE_HOME_BOTTOM', 'TradeBoardHomeCustomAdsIdeaSegment', 'TRADE_CARD_MID_AD'],
-        },
-        { id: 'live', label: 'Live Trades', locations: ['TRADE_ACTIVE', 'TRADE_ACTIVE_2', 'TRADE_ACTIVE_BOTTOM', 'EMPTY_ACTIVE'] },
+        { id: 'overview', label: 'Overview', locations: ['TRADE_HOME_TOP', 'TRADE_HOME_MID', 'TRADE_HOME_BOTTOM'] },
+        { id: 'live', label: 'Live Trades', locations: ['TRADE_ACTIVE', 'EMPTY_ACTIVE'] },
         { id: 'closed', label: 'Closed Trades', locations: ['UNPAID_CLOSED'] },
-        { id: 'commodity', label: 'Commodity', locations: ['TRADE_COMMODITY', 'TRADE_COMMODITY_2', 'EMPTY_COMMODITY'] },
+        { id: 'commodity', label: 'Commodity', locations: ['TRADE_COMMODITY', 'EMPTY_COMMODITY'] },
       ],
     },
+  },
+
+  // ---- Payment / checkout surfaces (flat modules — preview renders the served locations in order) -------
+  PAYMENT_SHEET: {
+    key: 'PAYMENT_SHEET', layoutKey: 'PAYMENT_SHEET_LAYOUT',
+    label: 'PRO Checkout', screenLabel: 'PRO Payment', usesWidgetOrder: false,
+  },
+  TRIAL_PAYMENT_PAGE: {
+    key: 'TRIAL_PAYMENT_PAGE', layoutKey: 'TRIAL_PAYMENT_PAGE_LAYOUT',
+    label: 'Trial Checkout', screenLabel: 'Trial Payment', usesWidgetOrder: false,
+  },
+  BASKET_PAYMENT_PAGE: {
+    key: 'BASKET_PAYMENT_PAGE', layoutKey: 'BASKET_PAYMENT_PAGE_LAYOUT',
+    label: 'Basket Checkout', screenLabel: 'Basket Payment', usesWidgetOrder: false,
+  },
+  MF_PAYMENT_PAGE: {
+    key: 'MF_PAYMENT_PAGE', layoutKey: 'MF_PAYMENT_PAGE_LAYOUT',
+    label: 'MF Checkout', screenLabel: 'Mutual Fund Payment', usesWidgetOrder: false,
+  },
+  COMMODITY_SUBSCRIPTION_AD_PAGE: {
+    key: 'COMMODITY_SUBSCRIPTION_AD_PAGE', layoutKey: 'COMMODITY_SUBSCRIPTION_AD_PAGE_LAYOUT',
+    label: 'Commodity Sub', screenLabel: 'Commodity Subscription', usesWidgetOrder: false,
+  },
+  PAYMENT_INVESTMENT_SUMMERY: {
+    key: 'PAYMENT_INVESTMENT_SUMMERY', layoutKey: 'PAYMENT_INVESTMENT_SUMMERY_LAYOUT',
+    label: 'Invest. Summary', screenLabel: 'Investment Summary', usesWidgetOrder: false,
   },
 };
 
 export const MODULE_KEYS = Object.keys(MODULES) as ModuleKey[];
+
+/** Grouping for the screen picker: the two live app screens, then the payment / checkout surfaces. */
+export const MODULE_GROUPS: { label: string; modules: ModuleKey[] }[] = [
+  { label: 'App screens', modules: ['EXPLORE', 'TRADECARD'] },
+  {
+    label: 'Payment & checkout',
+    modules: [
+      'PAYMENT_SHEET', 'TRIAL_PAYMENT_PAGE', 'BASKET_PAYMENT_PAGE',
+      'MF_PAYMENT_PAGE', 'COMMODITY_SUBSCRIPTION_AD_PAGE', 'PAYMENT_INVESTMENT_SUMMERY',
+    ],
+  },
+];
 
 export type Audience = 'paid' | 'unpaid';
 
@@ -118,7 +158,7 @@ export const NAV_TABS: NavTab[] = [
 const KEY = 'explore-admin:module';
 
 function isModuleKey(v: unknown): v is ModuleKey {
-  return v === 'EXPLORE' || v === 'TRADECARD';
+  return typeof v === 'string' && v in MODULES;
 }
 
 /**
